@@ -23,84 +23,82 @@ While debugging just these tests it's convenient to use this:
     nosetests --stop tests/test_models.py:TestProductModel
 
 """
-import os
-import logging
-import unittest
-from decimal import Decimal
-from service.models import Product, Category, db
-from service import app
-from tests.factories import ProductFactory
+import pytest
+from app import create_app, db
+from app.models import Product
+from exceptions import DataValidationError
 
-DATABASE_URI = os.getenv(
-    "DATABASE_URI", "postgresql://postgres:postgres@localhost:5432/postgres"
-)
+@pytest.fixture
+def app():
+    """Create and configure a new app instance for each test."""
+    app = create_app({
+        'TESTING': True,
+        'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:',  # in-memory DB for tests
+        'SQLALCHEMY_TRACK_MODIFICATIONS': False
+    })
 
-
-######################################################################
-#  P R O D U C T   M O D E L   T E S T   C A S E S
-######################################################################
-# pylint: disable=too-many-public-methods
-class TestProductModel(unittest.TestCase):
-    """Test Cases for Product Model"""
-
-    @classmethod
-    def setUpClass(cls):
-        """This runs once before the entire test suite"""
-        app.config["TESTING"] = True
-        app.config["DEBUG"] = False
-        app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URI
-        app.logger.setLevel(logging.CRITICAL)
-        Product.init_db(app)
-
-    @classmethod
-    def tearDownClass(cls):
-        """This runs once after the entire test suite"""
-        db.session.close()
-
-    def setUp(self):
-        """This runs before each test"""
-        db.session.query(Product).delete()  # clean up the last tests
-        db.session.commit()
-
-    def tearDown(self):
-        """This runs after each test"""
+    with app.app_context():
+        db.create_all()
+        yield app
         db.session.remove()
+        db.drop_all()
 
-    ######################################################################
-    #  T E S T   C A S E S
-    ######################################################################
+@pytest.fixture
+def sample_product():
+    """Return a dictionary of valid product data."""
+    return {
+        'name': 'Laptop',
+        'category': 'Electronics',
+        'price': 999.99,
+        'description': 'High-end gaming laptop',
+        'available': True
+    }
 
-    def test_create_a_product(self):
-        """It should Create a product and assert that it exists"""
-        product = Product(name="Fedora", description="A red hat", price=12.50, available=True, category=Category.CLOTHS)
-        self.assertEqual(str(product), "<Product Fedora id=[None]>")
-        self.assertTrue(product is not None)
-        self.assertEqual(product.id, None)
-        self.assertEqual(product.name, "Fedora")
-        self.assertEqual(product.description, "A red hat")
-        self.assertEqual(product.available, True)
-        self.assertEqual(product.price, 12.50)
-        self.assertEqual(product.category, Category.CLOTHS)
+def test_create_product(app, sample_product):
+    product = Product()
+    product.deserialize(sample_product)
+    product.create()
 
-    def test_add_a_product(self):
-        """It should Create a product and add it to the database"""
-        products = Product.all()
-        self.assertEqual(products, [])
-        product = ProductFactory()
-        product.id = None
-        product.create()
-        # Assert that it was assigned an id and shows up in the database
-        self.assertIsNotNone(product.id)
-        products = Product.all()
-        self.assertEqual(len(products), 1)
-        # Check that it matches the original product
-        new_product = products[0]
-        self.assertEqual(new_product.name, product.name)
-        self.assertEqual(new_product.description, product.description)
-        self.assertEqual(Decimal(new_product.price), product.price)
-        self.assertEqual(new_product.available, product.available)
-        self.assertEqual(new_product.category, product.category)
+    assert product.id is not None
+    assert product.name == 'Laptop'
+    assert product.available is True
 
-    #
-    # ADD YOUR TEST CASES HERE
-    #
+def test_update_product(app, sample_product):
+    product = Product()
+    product.deserialize(sample_product)
+    product.create()
+
+    product.price = 899.99
+    product.update()
+
+    updated = Product.query.get(product.id)
+    assert updated.price == 899.99
+
+def test_delete_product(app, sample_product):
+    product = Product()
+    product.deserialize(sample_product)
+    product.create()
+
+    product_id = product.id
+    product.delete()
+
+    assert Product.query.get(product_id) is None
+
+def test_deserialize_missing_required(app):
+    product = Product()
+    incomplete_data = {'name': 'Laptop', 'price': 999.99}  # missing category
+
+    with pytest.raises(DataValidationError) as exc:
+        product.deserialize(incomplete_data)
+
+    assert 'Missing category' in str(exc.value)
+
+def test_deserialize_optional_fields(app):
+    product = Product()
+    data = {'name': 'Mouse', 'category': 'Electronics', 'price': 49.99}  # no description, available
+
+    product.deserialize(data)
+    product.create()
+
+    assert product.description == ''
+    assert product.available is True
